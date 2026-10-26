@@ -3,6 +3,7 @@ const http = require('http');
 const {
   Client, GatewayIntentBits, Partials, AttachmentBuilder,
   TextDisplayBuilder, MediaGalleryBuilder, MediaGalleryItemBuilder, MessageFlags,
+  PermissionFlagsBits,
 } = require('discord.js');
 
 // ---------- CONFIG ----------
@@ -124,7 +125,10 @@ async function handle(msg, loaded = false) {
       post = posted.get(msg.id);
     }
     if (post) await updatePost(post, msg, count);
-    else if (count >= THRESHOLD) posted.set(msg.id, await createPost(msg, count));
+    else if (count >= THRESHOLD) {
+      posted.set(msg.id, await createPost(msg, count));
+      console.log(`[post] ${msg.id} published with ${count} reactions`);
+    }
   } catch (e) {
     console.error('handle:', e.message);
   } finally {
@@ -154,12 +158,51 @@ async function sweep() {
   }
 }
 
+// Revisa permisos del bot en los dos canales y lo deja escrito en los logs de Render
+async function diagnose() {
+  const checks = [
+    ['source', SOURCE_ID, ['ViewChannel', 'ReadMessageHistory']],
+    ['target', TARGET_ID, ['ViewChannel', 'SendMessages', 'AttachFiles']],
+  ];
+  for (const [name, id, need] of checks) {
+    try {
+      const ch = await client.channels.fetch(id);
+      const me = await ch.guild.members.fetchMe();
+      const perms = ch.permissionsFor(me);
+      const missing = need.filter(p => !perms.has(PermissionFlagsBits[p]));
+      console.log(`[check] ${name} #${ch.name}: ${missing.length ? 'MISSING ' + missing.join(', ') : 'OK'}`);
+    } catch (e) {
+      console.log(`[check] ${name}: cannot access channel (${e.message})`);
+    }
+  }
+}
+
+// Comando "!react msg": responde "AirReact Here!" (se borra solo) y, en tu servidor, fuerza una revisión
+let lastRun = 0;
+client.on('messageCreate', async msg => {
+  try {
+    if (msg.author.bot || !msg.guild) return;
+    if (!/^!react(\s+msg)?$/i.test(msg.content.trim())) return;
+
+    const reply = await msg.channel.send('AirReact Here!');
+    setTimeout(() => reply.delete().catch(() => {}), 5000);
+
+    if (msg.guildId === GUILD_ID && Date.now() - lastRun > 30000) {
+      lastRun = Date.now();
+      await diagnose();
+      sweep();
+    }
+  } catch (e) {
+    console.error('command:', e.message);
+  }
+});
+
 client.on('messageReactionAdd', onReaction);
 client.on('messageReactionRemove', onReaction);
 
 client.once('clientReady', () => {
   console.log(`Online as ${client.user.tag}`);
-  sweep();
+  diagnose().then(sweep);
   setInterval(sweep, SWEEP_MS);
 });
 
