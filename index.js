@@ -10,7 +10,7 @@ const {
 const GUILD_ID = '1547387310654361705';
 const SOURCE_ID = '1564398515021676694'; // canal donde suben imágenes
 const TARGET_ID = '1564397514361278616'; // canal donde se publican las de 10+ reacciones
-const THRESHOLD = 10;
+const THRESHOLD = 2;
 const EMOJI = '💫';
 const SWEEP_MS = 5 * 60 * 1000; // revisión periódica (por si el bot estuvo dormido)
 // -----------------------------
