@@ -77,15 +77,31 @@ function buildEmbed(src, author, i, total) {
     .setTimestamp(src.createdAt);
 }
 
+let warned = false;
+async function canEmbed(ch) {
+  const me = ch.guild.members.me || await ch.guild.members.fetchMe();
+  return ch.permissionsFor(me).has(PermissionFlagsBits.EmbedLinks);
+}
+async function warnOnce(ch) {
+  if (warned) return;
+  warned = true;
+  await ch.send('⚠️ AirReact needs the **Embed Links** permission in this channel to publish posts. Enable it for the bot and posts will appear automatically.').catch(() => {});
+}
+
 async function createPost(src, imgs, i, count, author) {
   const ch = await client.channels.fetch(TARGET_ID);
+  if (!(await canEmbed(ch))) {
+    await warnOnce(ch);
+    throw new Error('Missing Embed Links permission in the target channel');
+  }
   const embed = buildEmbed(src, author, i, imgs.length);
   try {
-    // Re-sube la imagen para que siga existiendo aunque borren el original
+    // Re-sube la imagen para que siga existiendo aunque borren el original.
+    // El nombre del archivo guarda la clave del post (id_nº) para no duplicarlo nunca.
     const r = await fetch(imgs[i].url);
     if (!r.ok) throw new Error('download failed');
     const ext = ((imgs[i].name || '').split('.').pop() || 'png').toLowerCase();
-    const file = new AttachmentBuilder(Buffer.from(await r.arrayBuffer()), { name: `image.${ext}` });
+    const file = new AttachmentBuilder(Buffer.from(await r.arrayBuffer()), { name: `${src.id}_${i + 1}.${ext}` });
     embed.setImage(`attachment://${file.name}`);
     return await ch.send({ content: header(count), embeds: [embed], files: [file] });
   } catch {
@@ -109,7 +125,9 @@ async function loadPosted() {
     if (m.author.id !== client.user.id) continue;
     let key;
     const f = /^(\d{17,20})(?: \((\d+)\/\d+\))?$/.exec(m.embeds[0]?.footer?.text || '');
+    const a = [...m.attachments.values()].map(x => /^(\d{17,20})_(\d+)\./.exec(x.name || '')).find(Boolean);
     if (f) key = `${f[1]}:${f[2] || 1}`;
+    else if (a) key = `${a[1]}:${a[2]}`;
     else {
       const old = /(\d{17,20}) \| <t:/.exec(textOf(m));
       if (old) key = `${old[1]}:1`;
@@ -118,7 +136,7 @@ async function loadPosted() {
   }
 }
 
-async function handle(msg, loaded = false) {
+async function handle(msg) {
   if (msg.guildId !== GUILD_ID || msg.channelId !== SOURCE_ID) return;
   if (!msg.author || msg.author.bot) return;
   const imgs = imageAttachments(msg);
@@ -128,7 +146,7 @@ async function handle(msg, loaded = false) {
   try {
     const count = countReactions(msg);
     const keyOf = i => `${msg.id}:${i + 1}`;
-    if (count >= THRESHOLD && !loaded && imgs.some((_, i) => !posted.has(keyOf(i)))) await loadPosted();
+    if (count >= THRESHOLD && imgs.some((_, i) => !posted.has(keyOf(i)))) await loadPosted();
 
     // actualiza el contador de los posts que ya existen
     for (let i = 0; i < imgs.length; i++) {
@@ -170,7 +188,7 @@ async function sweep() {
     const src = await client.channels.fetch(SOURCE_ID);
     const msgs = await src.messages.fetch({ limit: 100 });
     await loadPosted();
-    for (const m of [...msgs.values()].reverse()) await handle(m, true);
+    for (const m of [...msgs.values()].reverse()) await handle(m);
   } catch (e) {
     console.error('sweep:', e.message);
   }
