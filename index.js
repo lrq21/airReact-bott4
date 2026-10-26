@@ -1,16 +1,17 @@
 require('dotenv').config();
 const http = require('http');
 const {
-  Client, GatewayIntentBits, Partials, AttachmentBuilder, EmbedBuilder, PermissionFlagsBits,
+  Client, GatewayIntentBits, Partials, AttachmentBuilder, PermissionFlagsBits, MessageFlags,
+  TextDisplayBuilder, MediaGalleryBuilder, MediaGalleryItemBuilder,
 } = require('discord.js');
 
 // ---------- CONFIG ----------
 const GUILD_ID = '1547387310654361705';
 const SOURCE_ID = '1564398515021676694'; // canal donde suben imágenes
 const TARGET_ID = '1564397514361278616'; // canal donde se publican las de 10+ reacciones
-const THRESHOLD = 2;                    // reacciones necesarias (producción: 10)
-const EMOJI = '💫';
-const COLOR = 0xf0b232;                 // color de la barra del embed
+const THRESHOLD = 1;                    // reacciones necesarias (producción: 10)
+const MESSAGE = 'Your post is up 🎉';   // mensaje corto debajo de "Source"
+const LINK_TEXT = 'Go there!';          // texto del link que lleva al mensaje original
 const SWEEP_MS = 5 * 60 * 1000;         // revisión periódica (por si el bot estuvo dormido)
 // -----------------------------
 
@@ -29,7 +30,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildMessageReactions,
-    GatewayIntentBits.MessageContent, // necesario para leer adjuntos y el texto del mensaje
+    GatewayIntentBits.MessageContent, // necesario para leer los adjuntos
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
@@ -37,13 +38,12 @@ const client = new Client({
 const posted = new Map(); // "idMensajeOriginal:nºImagen" -> mensaje publicado por el bot
 const busy = new Set();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const ZW = '\u200b'; // caracter invisible: guarda el nº de imagen para no duplicar posts
 
 const isImage = a => (a.contentType || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(a.name || '');
 const imageAttachments = m => [...m.attachments.values()].filter(isImage).slice(0, 10);
 const countReactions = m => m.reactions.cache.reduce((n, r) => n + r.count, 0);
-const header = count => `${EMOJI} **${count}** <#${SOURCE_ID}>`;
 
-// Texto de posts antiguos (formato anterior) para no duplicarlos
 function textOf(m) {
   const out = [];
   const walk = list => {
@@ -56,45 +56,25 @@ function textOf(m) {
   return out.join('\n');
 }
 
-// Avatar + nombre que se muestra en el servidor (apodo > nombre global > usuario)
-async function resolveAuthor(src) {
-  const member = await src.guild.members.fetch(src.author.id).catch(() => null);
-  const u = src.author;
+// Source #canal @usuario / mensaje corto / Go there! / imagen / fecha y hora exacta
+function payload(src, i, imageUrl) {
+  const ts = Math.floor(src.createdTimestamp / 1000);
+  const msg = MESSAGE[0] + ZW.repeat(i + 1) + MESSAGE.slice(1);
   return {
-    name: member?.displayName || u.globalName || u.username,
-    icon: (member || u).displayAvatarURL({ size: 128 }),
+    flags: MessageFlags.IsComponentsV2,
+    allowedMentions: { parse: [] },
+    components: [
+      new TextDisplayBuilder().setContent(
+        `**Source** <#${SOURCE_ID}> <@${src.author.id}>\n${msg}\n[${LINK_TEXT}](${src.url})`
+      ),
+      new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(imageUrl)),
+      new TextDisplayBuilder().setContent(`<t:${ts}:F>`),
+    ],
   };
 }
 
-function buildEmbed(src, author, i, total) {
-  const text = (src.content || '').trim().slice(0, 3000);
-  const description = `${text ? text + '\n\n' : ''}[Jump There!](${src.url})`;
-  return new EmbedBuilder()
-    .setColor(COLOR)
-    .setAuthor({ name: author.name, iconURL: author.icon })
-    .setDescription(description)
-    .setFooter({ text: total > 1 ? `${src.id} (${i + 1}/${total})` : src.id })
-    .setTimestamp(src.createdAt);
-}
-
-let warned = false;
-async function canEmbed(ch) {
-  const me = ch.guild.members.me || await ch.guild.members.fetchMe();
-  return ch.permissionsFor(me).has(PermissionFlagsBits.EmbedLinks);
-}
-async function warnOnce(ch) {
-  if (warned) return;
-  warned = true;
-  await ch.send('⚠️ AirReact needs the **Embed Links** permission in this channel to publish posts. Enable it for the bot and posts will appear automatically.').catch(() => {});
-}
-
-async function createPost(src, imgs, i, count, author) {
+async function createPost(src, imgs, i) {
   const ch = await client.channels.fetch(TARGET_ID);
-  if (!(await canEmbed(ch))) {
-    await warnOnce(ch);
-    throw new Error('Missing Embed Links permission in the target channel');
-  }
-  const embed = buildEmbed(src, author, i, imgs.length);
   try {
     // Re-sube la imagen para que siga existiendo aunque borren el original.
     // El nombre del archivo guarda la clave del post (id_nº) para no duplicarlo nunca.
@@ -102,36 +82,28 @@ async function createPost(src, imgs, i, count, author) {
     if (!r.ok) throw new Error('download failed');
     const ext = ((imgs[i].name || '').split('.').pop() || 'png').toLowerCase();
     const file = new AttachmentBuilder(Buffer.from(await r.arrayBuffer()), { name: `${src.id}_${i + 1}.${ext}` });
-    embed.setImage(`attachment://${file.name}`);
-    return await ch.send({ content: header(count), embeds: [embed], files: [file] });
+    return await ch.send({ ...payload(src, i, `attachment://${file.name}`), files: [file] });
   } catch {
     // si no se puede re-subir (peso, error), usa el link original
-    embed.setImage(imgs[i].url);
-    return await ch.send({ content: header(count), embeds: [embed] });
+    return await ch.send(payload(src, i, imgs[i].url));
   }
 }
 
-async function updatePost(key, post, count) {
-  if (!post.embeds.length) return; // post antiguo, no se edita
-  const m = /\*\*(\d+)\*\*/.exec(post.content || '');
-  if (m && Number(m[1]) === count) return;
-  posted.set(key, await post.edit({ content: header(count) }));
-}
-
+// Lee los últimos posts del bot para saber qué imágenes ya se publicaron
 async function loadPosted() {
   const ch = await client.channels.fetch(TARGET_ID);
   const msgs = await ch.messages.fetch({ limit: 100 });
   for (const m of msgs.values()) {
     if (m.author.id !== client.user.id) continue;
+    const text = textOf(m);
+    const att = [...m.attachments.values()].map(x => /^(\d{17,20})_(\d+)\./.exec(x.name || '')).find(Boolean);
+    const link = /channels\/\d+\/\d+\/(\d{17,20})/.exec(text);
+    const old = /(\d{17,20}) \| <t:/.exec(text);
+    const zw = (text.match(/\u200b/g) || []).length;
     let key;
-    const f = /^(\d{17,20})(?: \((\d+)\/\d+\))?$/.exec(m.embeds[0]?.footer?.text || '');
-    const a = [...m.attachments.values()].map(x => /^(\d{17,20})_(\d+)\./.exec(x.name || '')).find(Boolean);
-    if (f) key = `${f[1]}:${f[2] || 1}`;
-    else if (a) key = `${a[1]}:${a[2]}`;
-    else {
-      const old = /(\d{17,20}) \| <t:/.exec(textOf(m));
-      if (old) key = `${old[1]}:1`;
-    }
+    if (att) key = `${att[1]}:${att[2]}`;
+    else if (link) key = `${link[1]}:${zw || 1}`;
+    else if (old) key = `${old[1]}:1`;
     if (key) posted.set(key, m);
   }
 }
@@ -145,25 +117,16 @@ async function handle(msg) {
   busy.add(msg.id);
   try {
     const count = countReactions(msg);
+    if (count < THRESHOLD) return;
     const keyOf = i => `${msg.id}:${i + 1}`;
-    if (count >= THRESHOLD && imgs.some((_, i) => !posted.has(keyOf(i)))) await loadPosted();
+    if (imgs.some((_, i) => !posted.has(keyOf(i)))) await loadPosted();
 
-    // actualiza el contador de los posts que ya existen
+    // cada imagen sale en su propio mensaje
     for (let i = 0; i < imgs.length; i++) {
-      const post = posted.get(keyOf(i));
-      if (post) await updatePost(keyOf(i), post, count);
-    }
-
-    // publica las imágenes que faltan, cada una en su propio mensaje
-    if (count >= THRESHOLD) {
-      let author = null;
-      for (let i = 0; i < imgs.length; i++) {
-        if (posted.has(keyOf(i))) continue;
-        author = author || await resolveAuthor(msg);
-        posted.set(keyOf(i), await createPost(msg, imgs, i, count, author));
-        console.log(`[post] ${msg.id} image ${i + 1}/${imgs.length} published with ${count} reactions`);
-        await sleep(500);
-      }
+      if (posted.has(keyOf(i))) continue;
+      posted.set(keyOf(i), await createPost(msg, imgs, i));
+      console.log(`[post] ${msg.id} image ${i + 1}/${imgs.length} published with ${count} reactions`);
+      await sleep(500);
     }
   } catch (e) {
     console.error('handle:', e.message);
@@ -198,7 +161,7 @@ async function sweep() {
 async function diagnose() {
   const checks = [
     ['source', SOURCE_ID, ['ViewChannel', 'ReadMessageHistory']],
-    ['target', TARGET_ID, ['ViewChannel', 'SendMessages', 'EmbedLinks', 'AttachFiles']],
+    ['target', TARGET_ID, ['ViewChannel', 'ReadMessageHistory', 'SendMessages', 'AttachFiles']],
   ];
   for (const [name, id, need] of checks) {
     try {
