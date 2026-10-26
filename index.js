@@ -8,8 +8,8 @@ const {
 
 // ---------- CONFIG ----------
 const GUILD_ID = '1547387310654361705';
-const SOURCE_ID = '1564131639158775818'; // canal donde suben imágenes
-const TARGET_ID = '1564143120713785344'; // canal donde se publican las de 10+ reacciones
+const SOURCE_ID = '1564398515021676694'; // canal donde suben imágenes
+const TARGET_ID = '1564397514361278616'; // canal donde se publican las de 10+ reacciones
 const THRESHOLD = 10;
 const EMOJI = '💫';
 const SWEEP_MS = 5 * 60 * 1000; // revisión periódica (por si el bot estuvo dormido)
