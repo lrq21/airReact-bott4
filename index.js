@@ -145,12 +145,19 @@ async function handle(msg) {
     pending.set(msg.id, msg);
     return;
   }
-  if (countReactions(msg) < THRESHOLD) return;
+  const totalReactions = countReactions(msg);
+  if (totalReactions < THRESHOLD) {
+    console.log(`[reactions] message ${msg.id}: ${totalReactions} total reactions, needs ${THRESHOLD}; skipped`);
+    return;
+  }
   busy.add(msg.id);
   try {
     const count = await countUniqueReactors(msg);
-    console.log(`[reactions] message ${msg.id}: ${count}/${THRESHOLD} unique users`);
-    if (count < THRESHOLD) return;
+    console.log(`[reactions] message ${msg.id}: ${count}/${THRESHOLD} unique users (${totalReactions} total reactions)`);
+    if (count < THRESHOLD) {
+      console.log(`[reactions] message ${msg.id}: skipped; duplicate emoji reactions do not add users`);
+      return;
+    }
     const keyOf = i => `${msg.id}:${i + 1}`;
     if (imgs.some((_, i) => !posted.has(keyOf(i)))) await loadPosted();
 
