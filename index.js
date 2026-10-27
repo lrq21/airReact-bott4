@@ -158,10 +158,6 @@ async function handle(msg) {
     pending.set(msg.id, msg);
     return;
   }
-  if (totalReactions < THRESHOLD) {
-    console.log(`[reactions] message ${msg.id}: ${totalReactions} total reactions, needs ${THRESHOLD}; skipped`);
-    return;
-  }
   busy.add(msg.id);
   try {
     const count = await countUniqueReactors(msg);
