@@ -7,8 +7,8 @@ const {
 
 // ---------- CONFIG ----------
 const GUILD_ID = '1547387310654361705';
-const SOURCE_ID = '1564398515021676694'; // canal donde suben imágenes
-const TARGET_ID = '1564397514361278616'; // canal donde se publican las de 10+ reacciones
+const SOURCE_ID = '1564397514361278616'; // canal donde suben imágenes
+const TARGET_ID = '1564398515021676694'; // canal donde se publican las de 10+ reacciones
 const THRESHOLD = 10;                    // reacciones necesarias (producción: 10)
 const MESSAGE = '/pickme Salon de la Fama 🌟';   // mensaje corto debajo de "Source"
 const LINK_TEXT = 'Go there!';          // texto del link que lleva al mensaje original
