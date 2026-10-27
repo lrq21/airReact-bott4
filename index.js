@@ -43,7 +43,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const ZW = '\u200b'; // caracter invisible: guarda el nº de imagen para no duplicar posts
 
 const isImage = a => (a.contentType || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(a.name || '');
-const imageAttachments = m => [...m.attachments.values()].filter(isImage).slice(0, 10);
+const imageSources = m => {
+  const attachments = [...m.attachments.values()]
+    .filter(isImage)
+    .map(attachment => ({ url: attachment.url, name: attachment.name || '' }));
+  const embeds = m.embeds.flatMap(embed => [embed.image?.url, embed.thumbnail?.url]
+    .filter(Boolean)
+    .map(url => ({ url, name: '' })));
+  return [...new Map([...attachments, ...embeds].map(image => [image.url, image])).values()].slice(0, 10);
+};
 const countReactions = m => m.reactions.cache.reduce((count, reaction) => count + reaction.count, 0);
 
 async function countUniqueReactors(msg) {
@@ -103,7 +111,10 @@ async function createPost(src, imgs, i) {
     // El nombre del archivo guarda la clave del post (id_nº) para no duplicarlo nunca.
     const r = await fetch(imgs[i].url);
     if (!r.ok) throw new Error('download failed');
-    const ext = ((imgs[i].name || '').split('.').pop() || 'png').toLowerCase();
+    const urlPath = new URL(imgs[i].url).pathname;
+    const ext = /\.([a-z0-9]{2,5})$/i.exec(imgs[i].name || '')?.[1]
+      || /\.([a-z0-9]{2,5})$/i.exec(urlPath)?.[1]
+      || 'png';
     const file = new AttachmentBuilder(Buffer.from(await r.arrayBuffer()), { name: `${src.id}_${i + 1}.${ext}` });
     return await ch.send({ ...payload(src, i, `attachment://${file.name}`), files: [file] });
   } catch {
@@ -139,13 +150,14 @@ async function loadPosted(fullHistory = false) {
 async function handle(msg) {
   if (msg.guildId !== GUILD_ID || msg.channelId !== SOURCE_ID) return;
   if (!msg.author || msg.author.bot) return;
-  const imgs = imageAttachments(msg);
+  const imgs = imageSources(msg);
+  const totalReactions = countReactions(msg);
+  console.log(`[scan] message ${msg.id}: attachments=${msg.attachments.size}, embeds=${msg.embeds.length}, images=${imgs.length}, reactions=${totalReactions}`);
   if (!imgs.length) return;
   if (busy.has(msg.id)) {
     pending.set(msg.id, msg);
     return;
   }
-  const totalReactions = countReactions(msg);
   if (totalReactions < THRESHOLD) {
     console.log(`[reactions] message ${msg.id}: ${totalReactions} total reactions, needs ${THRESHOLD}; skipped`);
     return;
