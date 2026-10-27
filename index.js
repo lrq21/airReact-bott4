@@ -44,6 +44,7 @@ const ZW = '\u200b'; // caracter invisible: guarda el nº de imagen para no dupl
 
 const isImage = a => (a.contentType || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(a.name || '');
 const imageAttachments = m => [...m.attachments.values()].filter(isImage).slice(0, 10);
+const countReactions = m => m.reactions.cache.reduce((count, reaction) => count + reaction.count, 0);
 
 async function countUniqueReactors(msg) {
   const users = new Set();
@@ -112,22 +113,27 @@ async function createPost(src, imgs, i) {
 }
 
 // Lee los últimos posts del bot para saber qué imágenes ya se publicaron
-async function loadPosted() {
+async function loadPosted(fullHistory = false) {
   const ch = await client.channels.fetch(TARGET_ID);
-  const msgs = await ch.messages.fetch({ limit: 100 });
-  for (const m of msgs.values()) {
-    if (m.author.id !== client.user.id) continue;
-    const text = textOf(m);
-    const att = [...m.attachments.values()].map(x => /^(\d{17,20})_(\d+)\./.exec(x.name || '')).find(Boolean);
-    const link = /channels\/\d+\/\d+\/(\d{17,20})/.exec(text);
-    const old = /(\d{17,20}) \| <t:/.exec(text);
-    const zw = (text.match(/\u200b/g) || []).length;
-    let key;
-    if (att) key = `${att[1]}:${att[2]}`;
-    else if (link) key = `${link[1]}:${zw || 1}`;
-    else if (old) key = `${old[1]}:1`;
-    if (key) posted.set(key, m);
-  }
+  let before;
+  do {
+    const msgs = await ch.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+    for (const m of msgs.values()) {
+      if (m.author.id !== client.user.id) continue;
+      const text = textOf(m);
+      const att = [...m.attachments.values()].map(x => /^(\d{17,20})_(\d+)\./.exec(x.name || '')).find(Boolean);
+      const link = /channels\/\d+\/\d+\/(\d{17,20})/.exec(text);
+      const old = /(\d{17,20}) \| <t:/.exec(text);
+      const zw = (text.match(/\u200b/g) || []).length;
+      let key;
+      if (att) key = `${att[1]}:${att[2]}`;
+      else if (link) key = `${link[1]}:${zw || 1}`;
+      else if (old) key = `${old[1]}:1`;
+      if (key) posted.set(key, m);
+    }
+    before = msgs.last()?.id;
+    if (!fullHistory || msgs.size < 100) break;
+  } while (true);
 }
 
 async function handle(msg) {
@@ -139,9 +145,11 @@ async function handle(msg) {
     pending.set(msg.id, msg);
     return;
   }
+  if (countReactions(msg) < THRESHOLD) return;
   busy.add(msg.id);
   try {
     const count = await countUniqueReactors(msg);
+    console.log(`[reactions] message ${msg.id}: ${count}/${THRESHOLD} unique users`);
     if (count < THRESHOLD) return;
     const keyOf = i => `${msg.id}:${i + 1}`;
     if (imgs.some((_, i) => !posted.has(keyOf(i)))) await loadPosted();
@@ -170,18 +178,29 @@ async function onReaction(reaction) {
     if (reaction.partial) reaction = await reaction.fetch();
     let msg = reaction.message;
     if (msg.partial) msg = await msg.fetch();
+    console.log(`[reaction-add] message ${msg.id}, emoji ${reaction.emoji.name || reaction.emoji.id}`);
     await handle(msg);
   } catch (e) {
     recordError('reaction', e);
   }
 }
 
-async function sweep() {
+async function sweep(fullHistory = false) {
   try {
+    console.log(`[sweep] starting ${fullHistory ? 'full-history recovery' : 'recent-message check'}`);
     const src = await client.channels.fetch(SOURCE_ID);
-    const msgs = await src.messages.fetch({ limit: 100 });
-    await loadPosted();
-    for (const m of [...msgs.values()].reverse()) await handle(m);
+    await loadPosted(fullHistory);
+    let before;
+    let scanned = 0;
+    do {
+      const msgs = await src.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+      if (!msgs.size) break;
+      scanned += msgs.size;
+      for (const m of [...msgs.values()].reverse()) await handle(m);
+      before = msgs.last()?.id;
+      if (!fullHistory || msgs.size < 100) break;
+    } while (true);
+    console.log(`[sweep] finished; scanned ${scanned} source messages`);
   } catch (e) {
     recordError('sweep', e);
   }
@@ -247,8 +266,8 @@ client.once('clientReady', async () => {
   } catch (e) {
     recordError('slash command registration', e);
   }
-  diagnose().then(sweep);
-  setInterval(sweep, SWEEP_MS);
+  diagnose().then(() => sweep(true));
+  setInterval(() => sweep(), SWEEP_MS);
 });
 
 client.login(TOKEN).catch(e => { console.error('Login failed:', e.message); process.exit(1); });
