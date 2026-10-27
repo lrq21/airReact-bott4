@@ -2,7 +2,7 @@ require('dotenv').config();
 const http = require('http');
 const {
   Client, GatewayIntentBits, Partials, AttachmentBuilder, PermissionFlagsBits, MessageFlags,
-  TextDisplayBuilder, MediaGalleryBuilder, MediaGalleryItemBuilder,
+  TextDisplayBuilder, MediaGalleryBuilder, MediaGalleryItemBuilder, SlashCommandBuilder,
 } = require('discord.js');
 
 // ---------- CONFIG ----------
@@ -37,12 +37,34 @@ const client = new Client({
 
 const posted = new Map(); // "idMensajeOriginal:nºImagen" -> mensaje publicado por el bot
 const busy = new Set();
+const pending = new Map();
+let runtimeErrors = 0;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const ZW = '\u200b'; // caracter invisible: guarda el nº de imagen para no duplicar posts
 
 const isImage = a => (a.contentType || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(a.name || '');
 const imageAttachments = m => [...m.attachments.values()].filter(isImage).slice(0, 10);
-const countReactions = m => m.reactions.cache.reduce((n, r) => n + r.count, 0);
+
+async function countUniqueReactors(msg) {
+  const users = new Set();
+  for (const reaction of msg.reactions.cache.values()) {
+    let after;
+    while (true) {
+      const page = await reaction.users.fetch({ limit: 100, ...(after ? { after } : {}) });
+      for (const user of page.values()) users.add(user.id);
+      if (page.size < 100 || users.size >= THRESHOLD) break;
+      after = page.last()?.id;
+      if (!after) break;
+    }
+    if (users.size >= THRESHOLD) break;
+  }
+  return users.size;
+}
+
+function recordError(context, error) {
+  runtimeErrors++;
+  console.error(`${context}:`, error.message);
+}
 
 function textOf(m) {
   const out = [];
@@ -113,10 +135,13 @@ async function handle(msg) {
   if (!msg.author || msg.author.bot) return;
   const imgs = imageAttachments(msg);
   if (!imgs.length) return;
-  if (busy.has(msg.id)) return;
+  if (busy.has(msg.id)) {
+    pending.set(msg.id, msg);
+    return;
+  }
   busy.add(msg.id);
   try {
-    const count = countReactions(msg);
+    const count = await countUniqueReactors(msg);
     if (count < THRESHOLD) return;
     const keyOf = i => `${msg.id}:${i + 1}`;
     if (imgs.some((_, i) => !posted.has(keyOf(i)))) await loadPosted();
@@ -129,9 +154,14 @@ async function handle(msg) {
       await sleep(500);
     }
   } catch (e) {
-    console.error('handle:', e.message);
+    recordError('handle', e);
   } finally {
     busy.delete(msg.id);
+    const queued = pending.get(msg.id);
+    if (queued) {
+      pending.delete(msg.id);
+      await handle(queued);
+    }
   }
 }
 
@@ -142,7 +172,7 @@ async function onReaction(reaction) {
     if (msg.partial) msg = await msg.fetch();
     await handle(msg);
   } catch (e) {
-    console.error('reaction:', e.message);
+    recordError('reaction', e);
   }
 }
 
@@ -153,12 +183,14 @@ async function sweep() {
     await loadPosted();
     for (const m of [...msgs.values()].reverse()) await handle(m);
   } catch (e) {
-    console.error('sweep:', e.message);
+    recordError('sweep', e);
   }
 }
 
 // Revisa permisos del bot en los dos canales y lo deja escrito en los logs de Render
 async function diagnose() {
+  let permissionIssues = 0;
+  let errors = 0;
   const checks = [
     ['source', SOURCE_ID, ['ViewChannel', 'ReadMessageHistory']],
     ['target', TARGET_ID, ['ViewChannel', 'ReadMessageHistory', 'SendMessages', 'AttachFiles']],
@@ -169,38 +201,52 @@ async function diagnose() {
       const me = await ch.guild.members.fetchMe();
       const perms = ch.permissionsFor(me);
       const missing = need.filter(p => !perms.has(PermissionFlagsBits[p]));
+      permissionIssues += missing.length;
       console.log(`[check] ${name} #${ch.name}: ${missing.length ? 'MISSING ' + missing.join(', ') : 'OK'}`);
     } catch (e) {
+      errors++;
       console.log(`[check] ${name}: cannot access channel (${e.message})`);
     }
   }
+  return { permissionIssues, errors };
 }
 
-// Comando "!react msg": responde "AirReact Here!" (se borra solo) y, en tu servidor, fuerza una revisión
-let lastRun = 0;
-client.on('messageCreate', async msg => {
+const reactCommand = new SlashCommandBuilder()
+  .setName('react')
+  .setDescription('Estado del bot')
+  .addSubcommand(subcommand => subcommand
+    .setName('status')
+    .setDescription('Comprueba el estado del bot'));
+
+client.on('interactionCreate', async interaction => {
   try {
-    if (msg.author.bot || !msg.guild) return;
-    if (!/^!react(\s+msg)?$/i.test(msg.content.trim())) return;
+    if (!interaction.isChatInputCommand() || interaction.commandName !== 'react') return;
+    if (interaction.guildId !== GUILD_ID || interaction.options.getSubcommand() !== 'status') return;
 
-    const reply = await msg.channel.send('AirReact Here!');
-    setTimeout(() => reply.delete().catch(() => {}), 5000);
-
-    if (msg.guildId === GUILD_ID && Date.now() - lastRun > 30000) {
-      lastRun = Date.now();
-      await diagnose();
-      sweep();
-    }
+    await interaction.deferReply();
+    const status = await diagnose();
+    const errors = runtimeErrors + status.errors;
+    const response = errors > 0
+      ? `Status 🔴 msg: ${errors} Check me urgent!`
+      : status.permissionIssues > 0
+        ? 'Status 🟠 msg: check me'
+        : 'Status 🟢 msg: all good';
+    await interaction.editReply(response);
+    setTimeout(() => interaction.deleteReply().catch(() => {}), 5000);
   } catch (e) {
-    console.error('command:', e.message);
+    recordError('command', e);
   }
 });
 
 client.on('messageReactionAdd', onReaction);
-client.on('messageReactionRemove', onReaction);
 
-client.once('clientReady', () => {
+client.once('clientReady', async () => {
   console.log(`Online as ${client.user.tag}`);
+  try {
+    await client.application.commands.create(reactCommand, GUILD_ID);
+  } catch (e) {
+    recordError('slash command registration', e);
+  }
   diagnose().then(sweep);
   setInterval(sweep, SWEEP_MS);
 });
