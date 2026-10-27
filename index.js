@@ -7,8 +7,8 @@ const {
 
 // ---------- CONFIG ----------
 const GUILD_ID = '1547387310654361705';
-const SOURCE_ID = '1564397514361278616'; // canal donde suben imágenes
-const TARGET_ID = '1564398515021676694'; // canal donde se publican las de 10+ reacciones
+const SOURCE_ID = '1564397514361278616'; // canal donde suben imágenes (#Hof)
+const TARGET_ID = '1564398515021676694'; // canal donde se publican las de 10+ reacciones (#Halloween)
 const THRESHOLD = 10;                    // reacciones necesarias (producción: 10)
 const MESSAGE = '/pickme Salon de la Fama 🌟';   // mensaje corto debajo de "Source"
 const LINK_TEXT = 'Go there!';          // texto del link que lleva al mensaje original
@@ -193,7 +193,7 @@ async function onReaction(reaction) {
     if (reaction.partial) reaction = await reaction.fetch();
     let msg = reaction.message;
     if (msg.partial) msg = await msg.fetch();
-    console.log(`[reaction-add] message ${msg.id}, emoji ${reaction.emoji.name || reaction.emoji.id}`);
+    console.log(`[reaction-add] message=${msg.id} guild=${msg.guildId} channel=${msg.channelId} emoji=${reaction.emoji.name || reaction.emoji.id}`);
     await handle(msg);
   } catch (e) {
     recordError('reaction', e);
